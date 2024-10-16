@@ -92,3 +92,36 @@ python src/run_evaluation.py [OPTIONS]
 python src/run_evaluation.py --models "1:100,2:110,3:120" --test_label 5 --num_workers 0 --device cpu --batch_size 64
 ```
 
+## Suggested hyperparameters
+
+### Best Hyperparameters:
+
+- `--g_lr`: Generator learning rate = 1e-3  
+  The learning rate for the generator, starting at 1e-3 and gradually decreasing by 10x every 10 epochs after reaching epoch 50.
+
+- `--d_lr`: Discriminator learning rate = 1e-4  
+  The learning rate for the discriminator starts at 1e-4 and is decreased by 10x at epochs 200, 210, and 220.
+
+- `--n_epochs`: Number of training epochs = 800
+  The total number of epochs for training, with adjustments to learning rates after specific epochs for both generator and discriminator.
+
+- `--batch_size`: Batch size for training = 128  
+  The batch size used for training the models.
+
+- `--lambda_one`: Lambda 1 for loss function = 256  
+  The weight applied to the first part of the loss function for the generator.
+
+- `--lambda_two`: Lambda 2 for loss function = 256  
+  The weight applied to the second part of the loss function for the generator.
+
+- `--interpolations_num`: Number of interpolations to use = 100
+  For each batch during training, 100 interpolation coefficients are sampled from a uniform distribution.
+
+- `--n_critic`: Number of discriminator updates before generator update = 5  
+
+- `--init_epochs`: Number of pre-training epochs for generator = 60  
+  The generator is pre-trained for 60 epochs before the main training begins.
+
+- `--vector_dim`: Latent space dimensionality = 512  
+  The autoencoder maps the images into a latent space of 512 dimensions.
+
