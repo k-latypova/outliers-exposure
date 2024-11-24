@@ -1,9 +1,7 @@
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader, Subset
-from torchvision import transforms
-
+from torch.utils.data import Dataset
 
 
 class CustomCIFARDataset(Dataset):
@@ -35,26 +33,6 @@ class CustomCIFARDataset(Dataset):
         output = torch.stack((normal_img, outlier_img), dim=0).squeeze(1)
         return output
 
-class MixedTrainingCIFARDataset(CustomCIFARDataset):
-    def __init__(self, normal_data, outliers_data):
-        self.data = self.__shuffle(outliers_data, normal_data)
-
-    def __shuffle(self, outliers_data, normal_data):
-        training_data = torch.cat(
-            (normal_data.dataset.data[normal_data.indices], outliers_data.dataset.data[outliers_data.indices]))
-        self.mean = training_data.mean(axis=(0, 1, 2)) / 255
-        self.std = training_data.std(axis=(0, 1, 2)) / 255
-        self.transform = transforms.Compose(
-            [transforms.ToTensor(),
-             transforms.Normalize(self.mean, self.std)]
-        )
-
-        outliers_shuffle_indices = torch.randint(0, len(outliers_data), (len(normal_data),))
-        outliers_shuffled = outliers_data.dataset[outliers_data.indices][outliers_shuffle_indices]
-
-        output = torch.stack((normal_data.dataset[normal_data.indices], outliers_shuffled), dim=1)
-        return output
-
 
 class MixedTestingCIFARDataset(CustomCIFARDataset):
     def __init__(self, normal_data, outliers_data, transform=None):
@@ -66,7 +44,6 @@ class MixedTestingCIFARDataset(CustomCIFARDataset):
         normal_labels = torch.zeros((len(normal_data), ))
         outliers_labels = torch.ones((len(outliers_data), ))
         self.labels = torch.cat((normal_labels, outliers_labels), dim=0)
-
 
     def __getitem__(self, idx):
         def process_img(item):

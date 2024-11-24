@@ -16,13 +16,12 @@ from torchvision import transforms
 from torchvision import transforms as T
 from tqdm import tqdm
 
-from src.datasets.cifar_datasets import MixedTestingCIFARDataset
 from src.datasets.cifar10_dataset import Cifar10Dataset
 from src.datasets.dataset_constructor import construct_cifar_datasets
 from src.networks.cifar_discriminator import CIFARDiscriminator
 from src.networks.cifar_double_cnn_generator import CifarGenerator
 from src.utils.cifar_models import CIFARModel, TrainingResult, db
-from src.utils.utils import calculate_f1_scores
+from src.utils.utils import calculate_f1_scores, seed_everyting
 
 cifar_dataset = datasets.CIFAR10(root="./cifar10", download=True, train=True)
 cifar_test_dataset = datasets.CIFAR10(root="./cifar10", download=True, train=False)
@@ -69,38 +68,6 @@ def gen_loss(gen_point, ground_truth):
     return loss
 
 
-def gen_loss_1(output, batch):
-    """
-    Given a batch of images, this function returns the reconstruction loss (MSE in our case)
-    """
-    try:
-        loss = nn.functional.mse_loss(batch, output, reduction="none")
-    except RuntimeError as e:
-        print(
-            f"The generated sample device: {batch.device}, the data devcie: {output.device}"
-        )
-        raise e
-    loss = loss.sum(dim=[1, 2, 3]).mean(dim=[0])
-    return loss
-
-
-def discriminator_loss(pred, is_real):
-    criterion = nn.BCELoss()
-    if is_real:
-        loss = criterion(pred, torch.ones_like(pred))
-    else:
-        loss = criterion(pred, torch.zeros_like(pred))
-    return loss
-
-
-def seed_everyting(seed, device):
-    torch.manual_seed(seed)
-    if device != "cpu":
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-
-
 class CIFARTrainingModel:
     def __init__(self, model: CIFARModel, device: str, save=True, num_workers=1):
         # setup(0, 1)
@@ -125,46 +92,6 @@ class CIFARTrainingModel:
         self.best_validation_result = None
         self.training_results: List[TrainingResult] = []
         self.num_workers = num_workers
-
-    def prepare_datasets(self, test_outliers_label):
-        normal_labels = (
-            list(map(int, self.model.normal_labels.split(",")))
-            if self.model.normal_labels
-            else []
-        )
-        outliers_labels = (
-            list(map(int, self.model.outliers_labels.split(",")))
-            if self.model.outliers_labels
-            else []
-        )
-        training_dataset, test_dataset, alt_test_dataset = construct_cifar_datasets(
-            self.model.normal_data_num,
-            self.model.outliers_num,
-            normal_labels,
-            outliers_labels,
-            test_outliers_label,
-            [0.8, 0.2],
-        )
-        mean = training_dataset.mean
-        std = training_dataset.std
-        reverse_mean = -mean / std
-        reverse_std = 1 / std
-        self.reverse_transform = transforms.Compose(
-            [
-                transforms.Normalize(mean=reverse_mean, std=reverse_std),
-                transforms.ToPILImage(),
-            ]
-        )
-
-        self.train_dataset, self.validation_dataset = torch.utils.data.random_split(
-            training_dataset, [0.8, 0.2]
-        )
-        self.test_dataset = test_dataset
-        self.validation_loader = DataLoader(
-            self.validation_dataset, batch_size=self.model.batch_size, shuffle=True
-        )
-
-        self.alt_test_dataset = alt_test_dataset
 
     def prepare_data(self, normal_data_size_num):
         normal_labels = list(map(int, self.model.normal_labels.split(",")))
@@ -254,40 +181,6 @@ class CIFARTrainingModel:
             num_workers=self.num_workers,
         )
 
-    def prepare_test_data(self):
-        normal_labels = list(map(int, self.model.normal_labels.split(",")))
-        outliers_labels = list(map(int, self.model.outliers_labels.split(",")))
-        targets = torch.Tensor(cifar_test_dataset.targets)
-        mask = targets == normal_labels[0]
-        for i in range(1, len(normal_labels)):
-            mask = mask | (targets == normal_labels[i])
-
-        normal_data = cifar_test_dataset.data[mask]
-
-        mask = targets == outliers_labels[0]
-        for i in range(1, len(outliers_labels)):
-            mask = mask | (targets == outliers_labels[i])
-        outliers_data = cifar_test_dataset.data[mask]
-        dataset = MixedTestingCIFARDataset(
-            normal_data, outliers_data, transform=self.transform
-        )
-        pin_memory = True if self.device == "cuda" else False
-        self.test_loader = DataLoader(
-            dataset,
-            batch_size=self.model.batch_size,
-            shuffle=True,
-            pin_memory_device=self.device,
-            pin_memory=pin_memory,
-            num_workers=self.num_workers,
-        )
-
-    def process_lambdas(self):
-        # self.model.lambda_1 = 5.0 / self.model.outliers_num
-        # self.model.lambda_2 = 50.0 / len(self.normal_train)
-        # self.__log(f"My lambdas: {self.model.lambda_1}, {self.model.lambda_2}")
-        with db:
-            self.model.save()
-
     def __create_output_directory(self):
         dir_name = f"cifar_{self.model.id}"
         path = os.path.join(os.sep, "scratch", "latypova", "oe", "results", dir_name)
@@ -345,8 +238,6 @@ class CIFARTrainingModel:
             else []
         )
         self.prepare_data(normal_data_num)
-        self.process_lambdas()
-        self.prepare_test_data()
         self.gen_optimizer = None
         self.disc_optimizer = None
         start_epoch = 0
@@ -519,7 +410,6 @@ class CIFARTrainingModel:
         for i in tqdm(range(starting_epoch + 1, epochs + 1)):
             total_discriminator_loss = 0.0
             total_generator_loss = 0.0
-            total_grad_penalty = 0.0
             gen_train_counter = 0
             iterator = iter(self.outliers_loader)
             normal_iterator = iter(self.train_normal_loader)
@@ -566,26 +456,10 @@ class CIFARTrainingModel:
                 self.disc_optimizer.zero_grad()
                 disc_output = self.anomaly_detector_nn(generated_output)
 
-                # ----------Clip Gradient of Anomaly Detector-------------
-
-                # gradients = autograd.grad(
-                #     outputs=disc_output,
-                #     inputs=generated_output,
-                #     grad_outputs=torch.ones(disc_output.size()).to(self.device),
-                #     create_graph=True,
-                #     retain_graph=True,
-                # )[0]
-                #
-                # gradients = gradients.view(self.model.batch_size * self.model.interpolations_sample_size, -1)
-                # grad_norm = gradients.norm(2, 1)
-                # grad_penalty = torch.mean((grad_norm - 1) ** 2)
-                grad_penalty = self.calculate_gradient_penalty(normalized_vector)
                 anomaly_detector_estimated_loss = disc_loss(
                     disc_output, interpolations_batch
                 )
                 total_discriminator_loss += anomaly_detector_estimated_loss.item()
-                anomaly_detector_estimated_loss += self.model.lambda_3 * grad_penalty
-                total_grad_penalty += grad_penalty.item()
 
                 # anomaly_detector_estimated_loss = disc_loss(disc_output, interpolations_batch)
 
@@ -640,7 +514,6 @@ class CIFARTrainingModel:
 
             avg_disc_loss = total_discriminator_loss / iterations_num
             avg_gen_loss = total_generator_loss / gen_train_counter
-            avg_grad_penalty = total_grad_penalty / iterations_num
             self.gen_train_losses.append(avg_gen_loss)
             self.d_train_losses.append(avg_disc_loss)
 
@@ -650,8 +523,7 @@ class CIFARTrainingModel:
             if save_checkpoint is not None and i % save_checkpoint == 0:
                 log_message = (f"Epoch: {i} | D: loss {avg_disc_loss} | "
                                f"G: loss {avg_gen_loss} | discriminator lr: {discriminator_scheduler.get_last_lr()} | "
-                               f"generator lr {generator_scheduler.get_last_lr()} | "
-                               f"Avg gradient penalty: {avg_grad_penalty}\n")
+                               f"generator lr {generator_scheduler.get_last_lr()} | ")
                 self.__log(log_message)
                 training_result = TrainingResult(
                     model=self.model.id,
@@ -919,27 +791,6 @@ class CIFARTrainingModel:
             )
         self.generator_nn.train()
         self.anomaly_detector_nn.train()
-
-    def calculate_metrics(self):
-        self.anomaly_detector_nn.eval()
-        predictions = torch.tensor([], device=self.device)
-        ground_truth = torch.tensor([])
-        with torch.no_grad():
-            for data, labels in self.test_loader:
-                data = data.to(self.device)
-                prediction = self.anomaly_detector_nn(data)
-                predictions = torch.cat((predictions, prediction))
-                ground_truth = torch.cat((ground_truth, labels))
-
-        predictions = predictions.cpu().view_as(ground_truth)
-        precision, recall, thresholds = precision_recall_curve(
-            ground_truth, predictions
-        )
-
-        f1_scores = calculate_f1_scores(predictions, ground_truth, thresholds)
-        optimal_f1_score = max(f1_scores)
-        self.anomaly_detector_nn.train()
-        return optimal_f1_score
 
     def calculate_gradient_penalty(self, normalized_vector):
         alpha = self.interpolation_distribution.sample(
